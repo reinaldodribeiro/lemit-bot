@@ -1,0 +1,19 @@
+{
+  "lemit": {
+    "email": "usuario@email.com",
+    "password": "senha"
+  },
+  "bot": {
+    "headless": true,
+    "delay_between_queries_seconds": 2,
+    "max_retries": 2,
+    "max_rows": null,
+    "input_folder": "entrada",
+    "output_folder": "saida"
+  },
+  "excel": {
+    "cpf_column": "cpf",
+    "name_column": "nome",
+    "whatsapp_template": "Olá {nome}, tudo bem?"
+  }
+}

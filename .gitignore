@@ -1,0 +1,24 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+dist/
+build/
+*.egg-info/
+
+# Runtime outputs (user data — never commit)
+entrada/
+saida/
+logs/
+checkpoint/
+
+# Config with credentials
+config.json
+
+# macOS
+.DS_Store
+
+# Windows
+Thumbs.db
