@@ -33,6 +33,13 @@ CAPTCHA_SELECTOR = (
     "iframe[src*='recaptcha'], iframe[src*='captcha'], "
     "[class*='captcha'], [id*='captcha']"
 )
+OTP_SELECTOR = (
+    "input#password_otp, "
+    "input[name='password_otp'], "
+    "input[name='otp'], "
+    "input[name='codigo'], "
+    "input[autocomplete='one-time-code']"
+)
 ERROR_SELECTOR = (
     ".error, .alert-danger, .alert-error, "
     "[role='alert'], .error-message, .mensagem-erro"
@@ -182,7 +189,7 @@ class LemitSession:
 
         try:
             self.page.wait_for_url(
-                lambda url: not self._url_is_login(url),
+                lambda url: not self._url_is_login(url) or self._has_otp(),
                 timeout=15_000,
             )
         except Exception:
@@ -192,11 +199,13 @@ class LemitSession:
             self.handle_captcha("após tentativa de login")
             try:
                 self.page.wait_for_url(
-                    lambda url: not self._url_is_login(url),
+                    lambda url: not self._url_is_login(url) or self._has_otp(),
                     timeout=60_000,
                 )
             except Exception:
                 pass
+
+        self._handle_otp_if_needed()
 
         if self._is_on_login_page():
             error_msg = self._get_login_error()
@@ -218,6 +227,66 @@ class LemitSession:
             return self.page.locator(CAPTCHA_SELECTOR).count() > 0
         except Exception:
             return False
+
+    def _has_otp(self) -> bool:
+        try:
+            return self.page.locator(OTP_SELECTOR).count() > 0
+        except Exception:
+            return False
+
+    def _handle_otp_if_needed(self) -> None:
+        try:
+            otp_input = self.page.locator(OTP_SELECTOR).first
+            if not otp_input.count():
+                return
+            try:
+                otp_input.wait_for(state="visible", timeout=5_000)
+            except Exception:
+                return
+        except Exception:
+            return
+
+        log.info("Verificação em duas etapas detectada")
+        max_attempts = 3
+        for attempt in range(1, max_attempts + 1):
+            print(
+                "\n[2FA] Verificação em duas etapas necessária.\n"
+                "Digite o código de 6 dígitos recebido e pressione ENTER: ",
+                end="",
+                flush=True,
+            )
+            try:
+                code = input().strip()
+            except (EOFError, KeyboardInterrupt):
+                raise RuntimeError("Login cancelado: código 2FA não informado.")
+
+            digits = "".join(ch for ch in code if ch.isdigit())
+            if len(digits) != 6:
+                print(f"[2FA] Código inválido (esperado 6 dígitos). Tentativa {attempt}/{max_attempts}.")
+                continue
+
+            try:
+                otp_input.fill(digits)
+                self.page.locator(SUBMIT_SELECTOR).first.click()
+            except Exception as e:
+                log.warning("Falha ao enviar código 2FA: %s", e)
+                continue
+
+            try:
+                self.page.wait_for_url(
+                    lambda url: not self._url_is_login(url) and not self._has_otp(),
+                    timeout=20_000,
+                )
+            except Exception:
+                pass
+
+            if not self._has_otp() and not self._is_on_login_page():
+                log.info("Código 2FA aceito")
+                return
+
+            print("[2FA] Código rejeitado. Tente novamente.")
+
+        raise RuntimeError("Login falhou: código 2FA inválido após várias tentativas.")
 
     def _save_debug_screenshot(self, label: str) -> None:
         try:
