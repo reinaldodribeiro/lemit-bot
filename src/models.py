@@ -9,6 +9,7 @@ class PageState(Enum):
     CAPTCHA = "captcha"
     ERROR = "error"
     SESSION_EXPIRED = "session_expired"
+    UNAUTHORIZED = "unauthorized"
 
 
 @dataclass

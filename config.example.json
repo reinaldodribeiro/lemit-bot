@@ -5,7 +5,7 @@
   },
   "bot": {
     "headless": true,
-    "delay_between_queries_seconds": 2,
+    "delay_between_queries_seconds": 5,
     "max_retries": 2,
     "max_rows": null,
     "input_folder": "entrada",

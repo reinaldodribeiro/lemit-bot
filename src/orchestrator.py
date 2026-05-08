@@ -1,5 +1,6 @@
 import logging
 import time
+from contextlib import contextmanager
 from typing import List
 
 from rich.console import Console
@@ -22,8 +23,22 @@ _EMPTY_STATS = {
     "encontrado_por_cpf": 0,
     "encontrado_por_nome": 0,
     "nao_encontrado": 0,
+    "rate_limit": 0,
     "erro": 0,
 }
+
+
+@contextmanager
+def _suspend_progress(progress: Progress, reason: str = ""):
+    """Pausa o display do Progress para liberar stdin/stdout (ex.: prompt OTP)."""
+    progress.stop()
+    if reason:
+        console.print(f"\n[yellow]{reason}[/yellow]")
+    try:
+        yield
+    finally:
+        progress.start()
+
 
 
 def run(
@@ -64,7 +79,7 @@ def run(
                 description=f"[{i}/{len(pending)}] {row.nome[:28]}",
             )
 
-            result = _process_row(config, row, session)
+            result = _process_row(config, row, session, progress)
 
             output_writer.append_row(result)
             checkpoint.mark_done(row.row_index, result.status_consulta)
@@ -72,13 +87,10 @@ def run(
 
             progress.advance(task)
 
-            if i < len(pending):
-                time.sleep(config.bot.delay_between_queries_seconds)
-
     return stats
 
 
-def _process_row(config: Config, row: InputRow, session: LemitSession) -> QueryResult:
+def _process_row(config: Config, row: InputRow, session: LemitSession, progress: Progress) -> QueryResult:
     result = QueryResult(
         row_index=row.row_index,
         nome=row.nome,
@@ -97,12 +109,18 @@ def _process_row(config: Config, row: InputRow, session: LemitSession) -> QueryR
 
         # --- CPF query ---
         if cpf_digits:
-            state = _query_with_retry(config, session, "cpf", cpf_digits)
+            state = _query_with_retry(config, session, "cpf", cpf_digits, progress)
             if state == PageState.FOUND:
                 phones = extract_phones(session.page)
                 emails = extract_emails(session.page)
                 _log_found(row.nome, phones, "CPF")
                 return _build_result(result, phones, emails, "cpf", "encontrado_por_cpf")
+            if state == PageState.UNAUTHORIZED:
+                result.status_consulta = "rate_limit"
+                result.consulta_usada = "cpf"
+                result.observacao = "Rate limit (Nao autorizado) — reprocessar depois"
+                log.info("Rate limit para %s — marcando para reprocessar", row.nome[:30])
+                return result
 
         # --- Name query (fallback) — desativado ---
         # if row.nome:
@@ -130,29 +148,58 @@ def _process_row(config: Config, row: InputRow, session: LemitSession) -> QueryR
 
 
 def _query_with_retry(
-    config: Config, session: LemitSession, query_type: str, value: str
+    config: Config, session: LemitSession, query_type: str, value: str, progress: Progress
 ) -> PageState:
-    for attempt in range(config.bot.max_retries + 1):
-        if attempt > 0:
-            log.warning(
-                "Tentativa %d/%d: %s='%s'", attempt, config.bot.max_retries, query_type, value[:20]
-            )
-            time.sleep(config.bot.delay_between_queries_seconds * 2)
+    UNAUTHORIZED_MAX_ATTEMPTS = 3
 
+    unauthorized_count = 0
+    other_attempts = 0
+    max_other_attempts = config.bot.max_retries + 1
+    safety_cap = max_other_attempts + UNAUTHORIZED_MAX_ATTEMPTS + 2
+    iterations = 0
+
+    while iterations < safety_cap:
+        iterations += 1
         screenshot_dir = config.base_dir / "checkpoint" / "screenshots"
         screenshot_dir.mkdir(parents=True, exist_ok=True)
-        state = query_by_cpf(session.page, value, screenshot_dir) if query_type == "cpf" else query_by_name(session.page, value)
+        state = (
+            query_by_cpf(session.page, value, screenshot_dir)
+            if query_type == "cpf"
+            else query_by_name(session.page, value)
+        )
+
+        # 'Não autorizado' = rate limit do site, não perda de sessão.
+        # Faz backoff e tenta de novo; após N tentativas, desiste sem relogin.
+        if state == PageState.UNAUTHORIZED:
+            unauthorized_count += 1
+            log.warning(
+                "'Não autorizado' (%d/%d) em %s='%s' — rate limit, aguardando",
+                unauthorized_count, UNAUTHORIZED_MAX_ATTEMPTS, query_type, value[:20],
+            )
+            if unauthorized_count >= UNAUTHORIZED_MAX_ATTEMPTS:
+                log.warning("Limite de retries para 'Não autorizado' atingido — desistindo da linha")
+                return PageState.UNAUTHORIZED
+            time.sleep(config.bot.delay_between_queries_seconds * 2)
+            continue
 
         if state == PageState.SESSION_EXPIRED:
-            session.ensure_authenticated()
+            with _suspend_progress(progress, "Sessao expirada — refazendo login (responda ao 2FA se solicitado)"):
+                session.ensure_authenticated()
             continue
 
         if state == PageState.CAPTCHA:
-            session.handle_captcha(f"durante consulta por {query_type}")
+            with _suspend_progress(progress, "Captcha detectado — resolva no navegador"):
+                session.handle_captcha(f"durante consulta por {query_type}")
             continue
 
-        if state in (PageState.ERROR, PageState.NOT_FOUND) and attempt < config.bot.max_retries:
-            continue
+        if state == PageState.ERROR:
+            other_attempts += 1
+            if other_attempts < max_other_attempts:
+                log.warning(
+                    "Retry %d/%d (error) em %s='%s'",
+                    other_attempts, max_other_attempts - 1, query_type, value[:20],
+                )
+                continue
 
         return state
 

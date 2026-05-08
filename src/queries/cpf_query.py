@@ -59,8 +59,8 @@ def query_by_cpf(page: Page, cpf: str, screenshot_dir: Path = None) -> PageState
         if _has_captcha(page):
             return PageState.CAPTCHA
         if _is_unauthorized(page):
-            log.warning("Consulta bloqueada (Nao autorizado) para CPF: %s", mask_cpf(cpf))
-            return PageState.ERROR
+            log.warning("'Nao autorizado' para CPF: %s (provável rate limit)", mask_cpf(cpf))
+            return PageState.UNAUTHORIZED
 
         _save_screenshot(page, screenshot_dir, f"cpf_{_screenshot_count:03d}_apos_resultado")
 

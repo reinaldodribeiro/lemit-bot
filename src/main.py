@@ -1,4 +1,5 @@
 import logging
+import shutil
 import sys
 from pathlib import Path
 
@@ -64,6 +65,7 @@ def main() -> None:
 
     # --- Checkpoint and output ---
     checkpoint_dir = base_dir / "checkpoint"
+    _reset_checkpoint_dir(checkpoint_dir)
     checkpoint = CheckpointManager(checkpoint_dir, input_file)
 
     output_dir = base_dir / config.bot.output_folder
@@ -106,6 +108,21 @@ def main() -> None:
         output_writer.close()
 
     _pause_exit(0)
+
+
+def _reset_checkpoint_dir(checkpoint_dir: Path) -> None:
+    screenshots_dir = checkpoint_dir / "screenshots"
+    if screenshots_dir.exists():
+        shutil.rmtree(screenshots_dir, ignore_errors=True)
+
+    auth_state = checkpoint_dir / "auth_state.json"
+    if auth_state.exists():
+        try:
+            auth_state.unlink()
+        except Exception as e:
+            logging.getLogger("lemit_bot.main").debug(
+                "Falha ao remover auth_state.json: %s", e
+            )
 
 
 def _pause_exit(code: int) -> None:

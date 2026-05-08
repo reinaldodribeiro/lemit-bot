@@ -82,9 +82,29 @@ class LemitSession:
     def ensure_authenticated(self) -> None:
         if not self._is_on_login_page():
             return
-        log.warning("Sessao expirada, fazendo re-login")
+        log.warning("Sessao expirada (URL de login) — fazendo re-login")
+        self.force_relogin()
+
+    def force_relogin(self) -> None:
+        log.warning("Forçando novo login (limpando cookies)")
+        try:
+            self._context.clear_cookies()
+        except Exception as e:
+            log.debug("Falha ao limpar cookies: %s", e)
+        try:
+            self.page.goto(LEMITTI_LOGIN_URL, wait_until="domcontentloaded", timeout=30_000)
+        except Exception as e:
+            log.debug("Falha ao navegar para login: %s", e)
         self._do_login()
         self._save_state()
+
+    def _is_unauthorized(self) -> bool:
+        try:
+            return self.page.locator(
+                "text=Não autorizado, text=nao autorizado, .toast:has-text('autorizado')"
+            ).count() > 0
+        except Exception:
+            return False
 
     def handle_captcha(self, context: str = "") -> None:
         where = f" {context}" if context else ""
@@ -267,26 +287,68 @@ class LemitSession:
 
             try:
                 otp_input.fill(digits)
-                self.page.locator(SUBMIT_SELECTOR).first.click()
+                self._submit_otp_form(otp_input)
             except Exception as e:
                 log.warning("Falha ao enviar código 2FA: %s", e)
                 continue
 
-            try:
-                self.page.wait_for_url(
-                    lambda url: not self._url_is_login(url) and not self._has_otp(),
-                    timeout=20_000,
-                )
-            except Exception:
-                pass
-
-            if not self._has_otp() and not self._is_on_login_page():
+            if self._wait_otp_resolved(timeout_ms=25_000):
                 log.info("Código 2FA aceito")
                 return
 
-            print("[2FA] Código rejeitado. Tente novamente.")
+            error_msg = self._get_login_error()
+            if error_msg:
+                print(f"[2FA] {error_msg}")
+            else:
+                print("[2FA] Código rejeitado ou tempo esgotado. Tente novamente.")
 
         raise RuntimeError("Login falhou: código 2FA inválido após várias tentativas.")
+
+    def _submit_otp_form(self, otp_input) -> None:
+        try:
+            otp_input.focus()
+        except Exception:
+            pass
+        try:
+            otp_input.press("Enter")
+        except Exception as e:
+            log.debug("Enter no input OTP falhou: %s", e)
+
+        if not self._has_otp():
+            return
+
+        candidates = [
+            "button:has-text('Verificar')",
+            "button:has-text('Confirmar')",
+            "button:has-text('Validar')",
+            "button:has-text('Continuar')",
+            "button:has-text('Entrar')",
+            "form:has(input#password_otp) button[type='submit']",
+            "form:has(input[name='password_otp']) button[type='submit']",
+            "button[type='submit']",
+        ]
+        for sel in candidates:
+            try:
+                btn = self.page.locator(sel).first
+                if btn.count() and btn.is_visible():
+                    btn.click()
+                    return
+            except Exception:
+                continue
+
+    def _wait_otp_resolved(self, timeout_ms: int = 20_000) -> bool:
+        deadline = time.time() + (timeout_ms / 1000.0)
+        while time.time() < deadline:
+            try:
+                self.page.wait_for_load_state("networkidle", timeout=1_500)
+            except Exception:
+                pass
+            if not self._has_otp() and not self._is_on_login_page():
+                return True
+            if self._get_login_error():
+                return False
+            time.sleep(0.5)
+        return not self._has_otp() and not self._is_on_login_page()
 
     def _save_debug_screenshot(self, label: str) -> None:
         try:
